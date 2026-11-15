@@ -88,8 +88,8 @@
   let lastWords = 0;
   function frame(now) {
     requestAnimationFrame(frame);
-    /* the words redraw at about 15 fps, like a sign; the koi under them move at full rate */
-    if (now - lastWords < 66) return;
+    /* the words redraw at about 30 fps, so the koi colours flow under them smoothly; the letters still settle like a sign */
+    if (now - lastWords < 32) return;
     lastWords = now;
     const s = now / 1000;
     title.draw(s); tag.draw(s);
@@ -242,6 +242,19 @@
 
   pond.start();
   weather?.start();
+
+  /* ?fps=1: a small readout of the frame rate, for checking the pond runs smoothly */
+  if (q.get("fps") === "1") {
+    const meter = document.createElement("div");
+    meter.style.cssText = "position:fixed;left:12px;top:10px;z-index:9;font:12px/16px 'Geist Mono',monospace;color:var(--ink);opacity:.75;pointer-events:none";
+    document.body.append(meter);
+    let r0 = pond.stats.renders, t0 = performance.now();
+    setInterval(() => {
+      const s = pond.stats, now = performance.now(), fps = (s.renders - r0) * 1000 / (now - t0);
+      r0 = s.renders; t0 = now;
+      meter.textContent = `${Math.round(fps)} fps · screen ${Math.round(1000 / s.refresh)} Hz · frame ${s.cost.toFixed(1)} ms · ${s.gpu ? "gpu" : "2d"}`;
+    }, 1000);
+  }
   buildWords().then(() => { box.classList.add("go"); requestAnimationFrame(frame); });
   /* canvas text cannot trigger a webfont load; redraw once the mono face is in */
   document.fonts?.load(`600 12px "Geist Mono"`).then(() => pond.colors());

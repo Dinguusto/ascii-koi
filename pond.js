@@ -41,6 +41,150 @@
   const css = n => `rgb(${n >> 16},${(n >> 8) & 255},${n & 255})`;
   const MONO = `"Geist Mono", ui-monospace, Menlo, monospace`;
 
+  /*
+   * Drawing on the GPU. The pond and the title only ever draw rectangles and single characters, so this
+   * stands in for those few canvas calls (fillRect, fillText, clearRect, globalAlpha, fillStyle, font,
+   * setTransform): every call becomes one quad in a list, and flush() draws the whole list, in order, in
+   * one go. The characters come from an atlas drawn with the real font at the same sub-pixel offset
+   * fillText would use, so the picture is the same at a fraction of the cost.
+   * Without WebGL 2, or with ?gl=0, the page draws with the plain 2D canvas as before.
+   */
+  const GL_OK = typeof location === "undefined" || !/[?&]gl=0\b/.test(location.search);
+  function glCells(canvas) {
+    if (!GL_OK || typeof document === "undefined") return null;
+    let gl = null;
+    try { gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true, powerPreference: "high-performance" }); } catch (e) { gl = null; }
+    if (!gl) return null;
+    const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, shader(gl.VERTEX_SHADER, `#version 300 es
+layout(location = 0) in vec4 aRect;
+layout(location = 1) in vec4 aUV;
+layout(location = 2) in vec4 aCol;
+uniform vec2 uView;
+out vec2 vUV;
+out vec4 vCol;
+void main() {
+  vec2 k = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+  vec2 p = (aRect.xy + aRect.zw * k) / uView * 2.0 - 1.0;
+  gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
+  vUV = mix(aUV.xy, aUV.zw, k);
+  vCol = aCol;
+}`));
+    gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `#version 300 es
+precision highp float;
+in vec2 vUV;
+in vec4 vCol;
+uniform sampler2D uTex;
+out vec4 o;
+void main() { float a = texture(uTex, vUV).a * vCol.a; o = vec4(vCol.rgb * a, a); }`));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+    const uView = gl.getUniformLocation(prog, "uView");
+    gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
+    const vao = gl.createVertexArray(), buf = gl.createBuffer();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    for (let j = 0; j < 3; j++) { gl.enableVertexAttribArray(j); gl.vertexAttribPointer(j, 4, gl.FLOAT, false, 48, j * 16); gl.vertexAttribDivisor(j, 1); }
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+    /* the atlas: a white corner for the rectangles, then each character as it is first needed */
+    const A = (global.devicePixelRatio || 1) > 1.5 ? 2048 : 1024, W = 1.5 / A;
+    const atlas = document.createElement("canvas");
+    atlas.width = atlas.height = A;
+    const actx = atlas.getContext("2d");
+    let shelfX, shelfY, shelfH, dirty, fonts;
+    const wipe = () => { actx.clearRect(0, 0, A, A); actx.globalAlpha = 1; actx.fillStyle = "#fff"; actx.fillRect(0, 0, 4, 4); shelfX = 4; shelfY = 0; shelfH = 4; dirty = true; fonts = new Map(); };
+    wipe();
+    const st = { sx: 1, sy: 1, tx: 0, ty: 0, alpha: 1, fill: "#000", col: [0, 0, 0, 1], font: "10px sans-serif", clear: false };
+    function place(str, q) {
+      const size = parseFloat((/(\d+(?:\.\d+)?)px/.exec(st.font) || [0, 10])[1]) * st.sy;
+      const font = st.font.replace(/(\d+(?:\.\d+)?)px/, size + "px");
+      actx.font = font;
+      const w = 2 * Math.ceil((actx.measureText(str).width + size * 0.6 + 4) / 2), h = 2 * Math.ceil((size * 1.7 + 4) / 2);
+      if (shelfX + w > A) { shelfX = 0; shelfY += shelfH; shelfH = 0; }
+      if (shelfY + h > A) { wipe(); return null; }
+      const x = shelfX, y = shelfY;
+      shelfX += w; shelfH = Math.max(shelfH, h);
+      actx.font = font; actx.textAlign = "center"; actx.textBaseline = "middle"; actx.fillStyle = "#fff";
+      actx.fillText(str, x + w / 2 + (q & 3) / 4, y + h / 2 + (q >> 2) / 4);
+      dirty = true;
+      return { u0: x / A, v0: y / A, u1: (x + w) / A, v1: (y + h) / A, w, h };
+    }
+    function glyph(str, q) {
+      let byStr = fonts.get(st.font);
+      if (!byStr) { byStr = new Map(); fonts.set(st.font, byStr); }
+      let slots = byStr.get(str);
+      if (!slots) { slots = new Array(16); byStr.set(str, slots); }
+      return slots[q] || (slots[q] = place(str, q));
+    }
+    const colours = new Map();
+    function parse(s) {
+      let c = colours.get(s);
+      if (c) return c;
+      if (colours.size > 4096) colours.clear();
+      let m, v = [0, 0, 0, 1];
+      if ((m = /^#([\da-f])([\da-f])([\da-f])$/i.exec(s))) v = [parseInt(m[1] + m[1], 16), parseInt(m[2] + m[2], 16), parseInt(m[3] + m[3], 16), 1];
+      else if ((m = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(s))) v = [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16), 1];
+      else if ((m = /^rgba?\(([^)]*)\)$/i.exec(s))) { const p = m[1].split(/[\s,/]+/).filter(Boolean).map(parseFloat); v = [p[0], p[1], p[2], p.length > 3 ? p[3] : 1]; }
+      c = [v[0] / 255, v[1] / 255, v[2] / 255, v[3]];
+      colours.set(s, c);
+      return c;
+    }
+    let data = new Float32Array(12 * 8192), n = 0;
+    function push(x, y, w, h, u0, v0, u1, v1, a) {
+      if ((n + 1) * 12 > data.length) { const d = new Float32Array(data.length * 2); d.set(data); data = d; }
+      const o = n++ * 12, c = st.col;
+      data[o] = x; data[o + 1] = y; data[o + 2] = w; data[o + 3] = h;
+      data[o + 4] = u0; data[o + 5] = v0; data[o + 6] = u1; data[o + 7] = v1;
+      data[o + 8] = c[0]; data[o + 9] = c[1]; data[o + 10] = c[2]; data[o + 11] = a;
+    }
+    return {
+      textAlign: "center", textBaseline: "middle", lineCap: "butt", lineWidth: 1, strokeStyle: "#000",
+      get globalAlpha() { return st.alpha; },
+      /* as on a canvas, a value outside 0 to 1 is ignored */
+      set globalAlpha(v) { if (v >= 0 && v <= 1) st.alpha = v; },
+      get fillStyle() { return st.fill; },
+      set fillStyle(v) { if (v !== st.fill) { st.fill = v; st.col = parse(String(v)); } },
+      get font() { return st.font; },
+      set font(v) { st.font = v; },
+      setTransform(a, b, c, d, e, f) { st.sx = a; st.sy = d; st.tx = e; st.ty = f; },
+      clearRect() { n = 0; st.clear = true; },
+      fillRect(x, y, w, h) {
+        const a = st.alpha * st.col[3];
+        if (a > 0) push(x * st.sx + st.tx, y * st.sy + st.ty, w * st.sx, h * st.sy, W, W, W, W, a);
+      },
+      fillText(str, x, y) {
+        const a = st.alpha * st.col[3];
+        if (!(a > 0)) return;
+        const X = x * st.sx + st.tx, Y = y * st.sy + st.ty;
+        let ix = Math.floor(X), iy = Math.floor(Y), qx = Math.round((X - ix) * 4), qy = Math.round((Y - iy) * 4);
+        if (qx === 4) { ix++; qx = 0; }
+        if (qy === 4) { iy++; qy = 0; }
+        const e = glyph(String(str), qx + qy * 4);
+        if (e) push(ix - e.w / 2, iy - e.h / 2, e.w, e.h, e.u0, e.v0, e.u1, e.v1, a);
+      },
+      beginPath() {}, rect() {}, fill() {}, arc() {}, stroke() {}, moveTo() {}, lineTo() {},
+      flush() {
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.useProgram(prog);
+        gl.bindVertexArray(vao);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        if (dirty) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas); dirty = false; }
+        if (st.clear) { gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); st.clear = false; }
+        gl.uniform2f(uView, canvas.width, canvas.height);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, n * 12), gl.STREAM_DRAW);
+        if (n) gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+        n = 0;
+      }
+    };
+  }
+
   /* Deterministic randomness, so the pond looks the same on every load. */
   function seeded(str) {
     let h = 2166136261;
@@ -56,8 +200,8 @@
   const tailW = s => 0.028 + 0.165 * Math.pow(sstep(0.72, 1, s), 0.85);
   const hit = { kind: 0, across: 0, rs: 1, ra: 0 };
   /* fin: an ellipse leaning back from a root on the body's edge */
-  function fin(s, a, rootS, angle, reach, width) {
-    const ra = halfW(rootS) * 0.85, ca = Math.cos(angle), sa = Math.sin(angle);
+  /* the fin's root width and the cosine and sine of its angle come worked out from classify */
+  function fin(s, a, rootS, ra, ca, sa, reach, width) {
     const ds = s - rootS, da = a - ra;
     const along = ds * ca + da * sa - reach, perp = -ds * sa + da * ca;
     if ((along / reach) ** 2 + (perp / width) ** 2 > 1) return false;
@@ -81,7 +225,65 @@
       const tw = tailW(s) * flare;
       if (a <= tw && s <= 0.88 + 0.12 * (a / tw)) { hit.kind = 2; hit.rs = 1; hit.ra = (a / tw) * 0.8; return true; }
     }
-    return fin(s, a, 0.2, 0.9 + 0.45 * (flare - 1), 0.07 * flare, 0.038) || fin(s, a, 0.47, 0.75, 0.038, 0.019);
+    /*
+     * The fins only reach a short way along the body (pectorals from s 0.17 to 0.40 at the widest flare,
+     * the dorsal from 0.46 to 0.54), so elsewhere they are not tested at all. The pectoral fins swing with
+     * the flare: their angle's cosine and sine are kept for the last two flares (one a side).
+     */
+    if (s > 0.16 && s < 0.41) {
+      let ca, sa;
+      if (flare === finF0) { ca = finC0; sa = finS0; }
+      else if (flare === finF1) { ca = finC1; sa = finS1; }
+      else {
+        const ang = 0.9 + 0.45 * (flare - 1);
+        ca = Math.cos(ang); sa = Math.sin(ang);
+        if (finTurn) { finF1 = flare; finC1 = ca; finS1 = sa; } else { finF0 = flare; finC0 = ca; finS0 = sa; }
+        finTurn = !finTurn;
+      }
+      if (fin(s, a, 0.2, FIN_RA1, ca, sa, 0.07 * flare, 0.038)) return true;
+    }
+    return s > 0.45 && s < 0.545 && fin(s, a, 0.47, FIN_RA2, FIN_C2, FIN_S2, 0.038, 0.019);
+  }
+  const FIN_RA1 = halfW(0.2) * 0.85, FIN_RA2 = halfW(0.47) * 0.85, FIN_C2 = Math.cos(0.75), FIN_S2 = Math.sin(0.75);
+  let finF0 = NaN, finC0 = 0, finS0 = 0, finF1 = NaN, finC1 = 0, finS1 = 0, finTurn = false;
+
+  /*
+   * Where a koi's shape can be, as maps over (s along the body, a out from the spine), one for each tenth of
+   * flare from 0.5 to 1.5 (each also holding its two neighbours, so any flare between is inside): found once
+   * by testing the shape itself, grown by a few steps to be safe, with running sums so any box of a map can
+   * be checked at once. A cell whose finer samples cannot land anywhere on the map cannot be part of the
+   * koi, so they are skipped. The picture is unchanged; the work is not.
+   */
+  const HS = 100, HA = 115, HSTEP = 0.003, HW = HA + 2, HF = 11;
+  const HSUMS = (() => {
+    const cells = (HS + 1) * (HA + 1), raw = [];
+    for (let k = 0; k < HF; k++) {
+      const h = new Uint8Array(cells), fl = 0.5 + 0.1 * k;
+      for (let b = 0; b <= HS; b++) for (let j = 0; j <= HA; j++) if (classify(b / HS, j * HSTEP, 0, fl, 0, 0)) h[b * (HA + 1) + j] = 1;
+      raw.push(h);
+    }
+    return raw.map((_, k) => {
+      const grown = new Uint8Array(cells), sum = new Int32Array((HS + 2) * HW);
+      for (let kk = Math.max(0, k - 1); kk <= Math.min(HF - 1, k + 1); kk++) {
+        const h = raw[kk];
+        for (let b = 0; b <= HS; b++) for (let j = 0; j <= HA; j++) {
+          if (!h[b * (HA + 1) + j]) continue;
+          for (let bb = Math.max(0, b - 2); bb <= Math.min(HS, b + 2); bb++) for (let jj = Math.max(0, j - 3); jj <= Math.min(HA, j + 3); jj++) grown[bb * (HA + 1) + jj] = 1;
+        }
+      }
+      for (let b = 0; b <= HS; b++) for (let j = 0; j <= HA; j++)
+        sum[(b + 1) * HW + j + 1] = grown[b * (HA + 1) + j] + sum[b * HW + j + 1] + sum[(b + 1) * HW + j] - sum[b * HW + j];
+      return sum;
+    });
+  })();
+  const shapeMap = flare => HSUMS[clamp(Math.round((flare - 0.5) * 10), 0, HF - 1)];
+  /* can the shape on this map lie between s0 and s1 along the body and a0 to a1 out from the spine? */
+  function canHit(sum, s0, s1, a0, a1) {
+    if (a0 > HA * HSTEP) return false;
+    const b0 = Math.max(0, Math.floor(s0 * HS)), b1 = Math.min(HS, Math.ceil(s1 * HS));
+    const j0 = Math.max(0, Math.floor(a0 / HSTEP)), j1 = Math.min(HA, Math.ceil(a1 / HSTEP));
+    if (b0 > b1 || j0 > j1) return false;
+    return sum[(b1 + 1) * HW + j1 + 1] - sum[b0 * HW + j1 + 1] - sum[(b1 + 1) * HW + j0] + sum[b0 * HW + j0] > 0;
   }
 
   /* ── markings: kohaku (red saddles), sanke (plus black spots), tancho (red crown) ── */
@@ -162,7 +364,7 @@
    * dim() returns the title's box in canvas pixels, or null: the koi fade under it, and the letters take on their colour.
    */
   function createPond(opts) {
-    const canvas = opts.canvas, ctx = canvas.getContext("2d");
+    const canvas = opts.canvas, ctx = glCells(canvas) || canvas.getContext("2d");
     const reduce = !!opts.reduce;
     const MOST = Math.max(3, Math.round(opts.most || VARIETY.length));
     const N = 10, RAMP = " .:-=+*#%@", SUB = [0.25, 0.25, 0.75, 0.25, 0.25, 0.75, 0.75, 0.75];
@@ -443,7 +645,7 @@
     }
 
     /* ── rasterising one koi into the cell buffers ── */
-    const spine = new Float32Array(N * 2), arc = new Float32Array(N);
+    const spine = new Float32Array(N * 2), arc = new Float32Array(N), cd2 = new Float64Array(N), cu = new Float64Array(N), segLen = new Float64Array(N);
     let arcTotal = 1, S = 0, V = 0, D = 0, TX = 1, TY = 0, SEG = 0;
     function sample(px, py, L, flareL, flareR, from = 0, to = N - 2) {
       let best = Infinity, bs = 0, sign = 1, past = 0, ahead = 0, lateral = 0;
@@ -451,6 +653,7 @@
         const ax = spine[n * 2], ay = spine[n * 2 + 1], sx = spine[n * 2 + 2] - ax, sy = spine[n * 2 + 3] - ay;
         const len2 = sx * sx + sy * sy || 1, raw = ((px - ax) * sx + (py - ay) * sy) / len2, u = clamp(raw, 0, 1);
         const d2 = (px - ax - sx * u) ** 2 + (py - ay - sy * u) ** 2;
+        cd2[n] = d2; cu[n] = u;
         if (d2 < best) {
           const len = Math.sqrt(len2), cross = sx * (py - ay) - sy * (px - ax);
           best = d2; bs = (arc[n] + u * len) / arcTotal; sign = cross >= 0 ? 1 : -1;
@@ -487,6 +690,9 @@
       const r0 = Math.max(0, Math.floor(Math.max(y0 - reach, 0) / ch)), r1 = Math.min(rows - 1, Math.floor(Math.min(y1 + reach, vh) / ch));
       if (c0 > c1 || r0 > r1) return;
       const diag = Math.hypot(cw, ch);
+      /* each segment's length, and how far a finer sample sits from its cell's centre (in pixels and along the body) */
+      for (let n = 0; n < N - 1; n++) { const sx = spine[n * 2 + 2] - spine[n * 2], sy = spine[n * 2 + 3] - spine[n * 2 + 1]; segLen[n] = Math.sqrt(sx * sx + sy * sy || 1); }
+      const dsub = Math.hypot(cw, ch) / 4 + 0.5, ds = dsub / arcTotal + 0.005, mapL = shapeMap(flareL), mapR = shapeMap(flareR);
       /* A koi rising for food comes up toward the surface: brighter, its shadow further below it. */
       const depth = lerp(f.depth, 1, f.rise * 0.85);
       const Kc = P.koi[f.colour], alphaBase = (P.dark ? 0.82 : 0.9) * (0.55 + 0.45 * depth) * f.seen * koiK;
@@ -499,6 +705,15 @@
           if (!got && D > L * (S > 0.4 && S < 0.62 ? 0.15 : 0.26) + diag) { c += Math.max(0, Math.floor((D - L * 0.26 - diag) / cw)); continue; }
           let kind = hit.kind, across = hit.across, rs = hit.rs, ra = hit.ra, s = S, v = V, tx = TX, ty = TY;
           const from = Math.max(0, SEG - 2), to = Math.min(N - 2, SEG + 2);
+          /* a cell that missed, and that no part of the koi near it can reach, needs no finer samples */
+          let near = got;
+          for (let n = from; !near && n <= to; n++) {
+            /* a finer sample's nearest point on this segment is within dsub of the centre's, and so is its distance */
+            const d = Math.sqrt(cd2[n]), sm = (arc[n] + cu[n] * segLen[n]) / arcTotal;
+            if (n === 0 && sm < 0.03 && d - dsub < 0.115 * L) near = true;
+            else near = canHit(mapL, sm - ds, sm + ds, (d - dsub) / L, (d + dsub) / L) || (mapR !== mapL && canHit(mapR, sm - ds, sm + ds, (d - dsub) / L, (d + dsub) / L));
+          }
+          if (!near) continue;
           let hits = got ? 1 : 0;
           const deep = got && kind === 1 && s > 0.05 && s < 0.7 && halfW(s) * L - D > diag * 0.4;
           if (deep) hits = 5;
@@ -963,6 +1178,7 @@
       drawFood();
       for (const p of paws) drawPaw(p);
       ctx.globalAlpha = 1;
+      if (ctx.flush) ctx.flush();
     }
 
     /* From scratch: the shoal, then a few seconds of swimming so it starts in natural curves. */
@@ -990,25 +1206,30 @@
     }
 
     /*
-     * Live mode: one animation frame. The pond moves at the display's rate and
-     * draws a frame at most every 12 ms: a 60 Hz screen gets every frame, a
-     * 120 Hz screen every other one. A slow machine simply gets fewer frames
-     * from the browser; the time a draw call takes is no guide, as it includes
-     * waiting for the GPU to finish the frame before.
+     * Live mode: one animation frame. The pond moves and draws at the display's
+     * rate (60, 120, 144 Hz …). Drawing goes through the GPU (glCells), so a frame
+     * costs only the pond's own work; if that ever takes more than about 60% of a
+     * refresh, the pond draws every other refresh instead, evenly, rather than
+     * stuttering.
      */
-    let last = 0, drawn = 0, running = false, dirty = true;
+    let last = 0, drawn = 0, running = false, dirty = true, gapK = 16.7, costK = 0, renders = 0;
     function frame(now) {
       if (!running) return;
       requestAnimationFrame(frame);
-      const dt = Math.min(0.05, (now - last) / 1000 || 0);
+      const gap = now - last, dt = Math.min(0.05, gap / 1000 || 0);
       last = now;
+      if (gap > 0 && gap < 100) gapK += (gap - gapK) * 0.05;
       const moving = !paused && !reduce;
       if (moving && dt > 0) advance(dt);
       if (!moving && !dirty) return;
-      if (now - drawn < 12 && !dirty) return;
+      /* every refresh while a frame takes well under one; if the machine can't keep up, every other refresh, evenly */
+      if (now - drawn < (costK > gapK * 0.6 ? gapK * 1.5 : 2) && !dirty) return;
       dirty = false;
       drawn = now;
+      const c0 = performance.now();
       render();
+      costK += (performance.now() - c0 - costK) * 0.05;
+      renders++;
     }
 
     return {
@@ -1041,6 +1262,8 @@
       feed: (x, y) => feed(x, y),
       pause(v) { paused = v === undefined ? !paused : !!v; dirty = true; return paused; },
       get paused() { return paused; },
+      /* for ?fps=1: frames drawn so far, what one costs (ms), and the screen's refresh interval (ms) */
+      get stats() { return { renders, cost: costK, refresh: gapK, gpu: !!ctx.flush }; },
       get time() { return t; },
       /* for tests: the koi and the food */
       get fish() { return fish; },
@@ -1078,7 +1301,7 @@
    * --title-from, --title-to (left to right), --title-glow and --pond.
    */
   function AsciiMark(canvas, spec, look = {}) {
-    const ctx = canvas.getContext("2d");
+    const ctx = glCells(canvas) || canvas.getContext("2d");
     const NOISE = "/\\|=+*%#@", EDGE = " |/-\\";
     let cols = 0, rows = 0, cw = 6, ch = 8, cov = null, born = null, edge = null, ex = null, ey = null;
     let tone = 1, glowK = 0, ready = false, dpr = 1, glow = null, gctx = null, gimg = null;
@@ -1205,6 +1428,7 @@
         ctx.globalAlpha = Q.a[j]; ctx.fillText(Q.g[j], Q.x[j], Q.y[j]);
       }
       ctx.globalAlpha = 1;
+      if (ctx.flush) ctx.flush();
       if (glow) gctx.putImageData(gimg, 0, 0);
     }
     return { build, draw, get glow() { return glow; }, get size() { return { w: cols * cw, h: rows * ch }; } };
