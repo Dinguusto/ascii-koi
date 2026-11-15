@@ -24,6 +24,10 @@
     <canvas class="wordmark-tag" id="wordmark-tag" aria-hidden="true"></canvas>
     <p class="intro-line" id="intro-date"></p>
   </div>
+  <form class="search" id="search" role="search" autocomplete="off">
+    <span class="search-glyph" aria-hidden="true">&gt;</span>
+    <input id="q" name="q" type="text" placeholder="search or type a url" aria-label="Search or type a URL" spellcheck="false" autocapitalize="off" autocomplete="off" autofocus>
+  </form>
 </div>
 <canvas id="snap" aria-hidden="true"></canvas>
 <div class="ui" id="ui">
@@ -32,7 +36,7 @@
     <button type="button" role="radio" data-theme-pick="black">black</button>
     <button type="button" role="radio" data-theme-pick="light">light</button>
   </div>
-  <p class="hint"><span class="mouse"><b>click</b> cat paw</span><span class="mouse"><b>right-click</b> feed</span><span class="touch"><b>tap</b> cat paw</span><span class="touch"><b>hold</b> feed</span><span class="desk"><b>1 2 3</b> water</span><span class="desk"><b>space</b> pause</span><span id="pause-state"></span></p>
+  <p class="hint"><span class="mouse"><b>click</b> cat paw</span><span class="mouse"><b>right-click</b> feed</span><span class="touch"><b>tap</b> cat paw</span><span class="touch"><b>hold</b> feed</span><span class="desk"><b>type</b> search</span><span class="desk"><b>1 2 3</b> water</span><span class="desk"><b>space</b> pause</span><span id="pause-state"></span></p>
   <a id="gh" href="https://github.com/pursurer/ascii-koi" target="_blank" rel="noopener">★ github</a>
 </div>
 <script src="pond.js"></script>

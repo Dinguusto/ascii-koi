@@ -5,7 +5,8 @@
  *   ?theme=pond|black|light    the water (remembered when you switch)
  *   ?title=One%20Page&tag=is%20all%20you%20need   your own words instead of the clock
  *   ?ui=0                       no controls (for a wallpaper or a recording)
- *   keys: 1 2 3 or T for the water, space to pause
+ *   ?engine=google|ddg|bing|brave|kagi   where the search box sends you
+ *   keys: 1 2 3 or T for the water, space to pause, / or just start typing to search
  */
 (() => {
   "use strict";
@@ -149,7 +150,7 @@
   mark();
 
   /* ── the hands ── */
-  const onUi = e => e.target.closest && e.target.closest(".ui");
+  const onUi = e => e.target.closest && e.target.closest(".ui, .search");
   let held = null, fedAt = 0;
   const feedAt = (x, y) => { const now = performance.now(); if (now - fedAt < 500) return; fedAt = now; pond.feed(x, y); };
   addEventListener("pointerdown", e => {
@@ -192,6 +193,43 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => buildWords(), 120);
   });
+
+  /* ── the search: type and go, like the browser's own new tab ──
+   *   ?engine=google|ddg|bing|brave|kagi, or your own URL with %s for the words
+   *   ?search=0  no search box
+   */
+  const form = document.getElementById("search");
+  const input = document.getElementById("q");
+  const ENGINES = {
+    google: "https://www.google.com/search?q=%s", ddg: "https://duckduckgo.com/?q=%s",
+    bing: "https://www.bing.com/search?q=%s", brave: "https://search.brave.com/search?q=%s", kagi: "https://kagi.com/search?q=%s"
+  };
+  const pick = q.get("engine") || "";
+  const engine = ENGINES[pick] || (pick.includes("%s") ? pick : ENGINES.google);
+  if (q.get("search") === "0") form.hidden = true;
+  /* a URL if it looks like one, otherwise a search */
+  const asUrl = s => {
+    if (/\s/.test(s)) return null;
+    if (/^[a-z][\w+.-]*:\/\//i.test(s)) return s;
+    if (/^(localhost|\d{1,3}(\.\d{1,3}){3})(:\d+)?([\/?#].*)?$/i.test(s)) return "http://" + s;
+    if (/^[^\/?#@]+\.[a-z]{2,}(:\d+)?([\/?#].*)?$/i.test(s)) return "https://" + s;
+    return null;
+  };
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const s = input.value.trim();
+    if (!s) return;
+    location.href = asUrl(s) || engine.replace("%s", encodeURIComponent(s));
+  });
+  input.addEventListener("keydown", e => { if (e.key === "Escape") { input.value = ""; input.blur(); } });
+  /* typing anywhere lands in the box; 1 2 3, T and space still belong to the pond when the box is not focused */
+  addEventListener("keydown", e => {
+    if (form.hidden || document.activeElement === input || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "/") { e.preventDefault(); input.focus(); return; }
+    if (e.key.length !== 1 || /^[123tT ]$/.test(e.key)) return;
+    input.focus();
+  });
+  if (!form.hidden) input.focus();
 
   pond.start();
   buildWords().then(() => { box.classList.add("go"); requestAnimationFrame(frame); });
