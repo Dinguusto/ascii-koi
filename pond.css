@@ -112,4 +112,24 @@ body {
 .search input::placeholder { color: color-mix(in srgb, var(--ink) 42%, transparent); }
 .search input:focus-visible { outline: none; }
 @media (max-width: 720px) { .search { margin-top: 28px; width: 90vw; } }
+
+/* ── suggestions under the search box: the address bar's list, in the pond's own type ── */
+.intro:has(.suggest:not([hidden])) { z-index: 4; }
+.suggest {
+  position: absolute; left: -1px; right: -1px; top: calc(100% + 6px); z-index: 5;
+  margin: 0; padding: 6px 0; list-style: none; text-align: left;
+  max-height: min(320px, 42vh); overflow-y: auto; scrollbar-width: none;
+  border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); border-radius: 10px;
+  background: color-mix(in srgb, var(--pond) 92%, transparent);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  font-size: 13px; line-height: 18px; letter-spacing: 0.02em; cursor: default;
+}
+.suggest li { display: flex; align-items: baseline; gap: 12px; padding: 6px 16px; white-space: nowrap; overflow: hidden; cursor: pointer; }
+.suggest .k { flex: none; width: 1ch; color: var(--accent); visibility: hidden; }
+.suggest .t { flex: 0 1 auto; min-width: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.suggest .u { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: color-mix(in srgb, var(--ink) 45%, transparent); }
+.suggest .g { flex: none; font-size: 11px; text-transform: lowercase; color: color-mix(in srgb, var(--ink) 36%, transparent); }
+.suggest li[aria-selected="true"] { background: color-mix(in srgb, var(--ink) 9%, transparent); }
+.suggest li[aria-selected="true"] .k { visibility: visible; }
+.suggest li[aria-selected="true"] .g { color: color-mix(in srgb, var(--ink) 55%, transparent); }
 @media (prefers-reduced-motion: reduce) { .search { opacity: 1; } .intro-box.go + .search { animation: none; } }

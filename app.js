@@ -219,13 +219,96 @@
     if (/^[^\/?#@]+\.[a-z]{2,}(:\d+)?([\/?#].*)?$/i.test(s)) return "https://" + s;
     return null;
   };
+  /*
+   * Suggestions under the box, like the browser's own address bar: your history, top sites and bookmarks.
+   * A web page can't read those, so they come from the Koi Suggest helper add-on when it is installed (it
+   * answers through window messages; nothing leaves the browser). Without it, the box suggests the places
+   * opened from it before, kept in this browser only. The list opens when you type, click the box or press
+   * the down arrow, not by itself when a new tab opens.
+   */
+  const list = document.createElement("ul");
+  list.className = "suggest"; list.id = "suggest"; list.hidden = true;
+  list.setAttribute("role", "listbox");
+  form.append(list);
+  input.setAttribute("aria-controls", "suggest");
+  input.setAttribute("aria-autocomplete", "list");
+  const RECENT = "ascii-koi-recent", TAGS = { history: "visited", top: "top site", bookmark: "bookmark", recent: "opened here" };
+  const recent = {
+    get() { try { return JSON.parse(localStorage.getItem(RECENT)) || []; } catch (e) { return []; } },
+    add(url, title) {
+      try {
+        const r = recent.get(), old = r.find(x => x.url === url);
+        const next = [{ url, title, n: (old ? old.n : 0) + 1, at: Date.now() }, ...r.filter(x => x.url !== url)];
+        localStorage.setItem(RECENT, JSON.stringify(next.slice(0, 60)));
+      } catch (e) { /* private window: not kept */ }
+    }
+  };
+  const host = u => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return u; } };
+  let helper = false, open = false, items = [], sel = -1, asked = 0;
+  addEventListener("message", e => {
+    if (e.source !== window || !e.data || typeof e.data.koi !== "string") return;
+    if (e.data.koi === "hello") { if (!helper) { helper = true; if (open) askSuggest(); } }
+    else if (e.data.koi === "suggestions" && e.data.id === asked && Array.isArray(e.data.items)) showSuggest(e.data.items);
+  });
+  postMessage({ koi: "ping" }, "*");
+  function localSuggest(s) {
+    const t = s.toLowerCase();
+    return recent.get().filter(x => !t || x.url.toLowerCase().includes(t) || String(x.title || "").toLowerCase().includes(t))
+      .sort((a, b) => (b.n - a.n) || (b.at - a.at)).slice(0, 6).map(x => ({ url: x.url, title: x.title, kind: "recent" }));
+  }
+  function askSuggest() {
+    const s = input.value.trim();
+    if (helper) { asked++; postMessage({ koi: "suggest", id: asked, q: s }, "*"); }
+    else showSuggest(localSuggest(s));
+  }
+  function showSuggest(next) {
+    items = next.filter(it => it && /^https?:/i.test(it.url)).slice(0, 8); sel = -1;
+    list.textContent = "";
+    items.forEach((it, j) => {
+      const li = document.createElement("li");
+      li.id = "sg" + j; li.dataset.j = j; li.setAttribute("role", "option");
+      const part = (cls, text) => { const el = document.createElement("span"); el.className = cls; el.textContent = text; return el; };
+      li.append(part("k", ">"), part("t", it.title || host(it.url)), part("u", it.url.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")), part("g", TAGS[it.kind] || ""));
+      list.append(li);
+    });
+    list.hidden = !open || !items.length || document.activeElement !== input;
+    markSel();
+  }
+  function markSel() {
+    [...list.children].forEach((li, j) => li.setAttribute("aria-selected", String(j === sel)));
+    if (sel >= 0) { input.setAttribute("aria-activedescendant", "sg" + sel); list.children[sel].scrollIntoView({ block: "nearest" }); }
+    else input.removeAttribute("aria-activedescendant");
+  }
+  const openList = () => { open = true; askSuggest(); };
+  const closeList = () => { open = false; list.hidden = true; sel = -1; markSel(); };
+  const goTo = (url, title) => { recent.add(url, title); location.href = url; };
+  input.addEventListener("input", openList);
+  input.addEventListener("pointerdown", () => { if (list.hidden) openList(); });
+  input.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== input) closeList(); }, 120));
+  list.addEventListener("pointerdown", e => e.preventDefault());
+  list.addEventListener("click", e => { const li = e.target.closest("li"); if (li) { const it = items[+li.dataset.j]; goTo(it.url, it.title); } });
+  list.addEventListener("pointermove", e => { const li = e.target.closest("li"); if (li && +li.dataset.j !== sel) { sel = +li.dataset.j; markSel(); } });
+
   form.addEventListener("submit", e => {
     e.preventDefault();
+    if (!list.hidden && sel >= 0) { const it = items[sel]; goTo(it.url, it.title); return; }
     const s = input.value.trim();
     if (!s) return;
-    location.href = asUrl(s) || engine.replace("%s", encodeURIComponent(s));
+    goTo(asUrl(s) || engine.replace("%s", encodeURIComponent(s)), s);
   });
-  input.addEventListener("keydown", e => { if (e.key === "Escape") { input.value = ""; input.blur(); } });
+  input.addEventListener("keydown", e => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (list.hidden) { openList(); return; }
+      const n = items.length;
+      if (!n) return;
+      sel = e.key === "ArrowDown" ? (sel + 1 >= n ? -1 : sel + 1) : (sel - 1 < -1 ? n - 1 : sel - 1);
+      markSel();
+    } else if (e.key === "Escape") {
+      if (!list.hidden) { closeList(); return; }
+      input.value = ""; input.blur();
+    }
+  });
   /* typing anywhere lands in the box; 1 2 3, T and space still belong to the pond when the box is not focused */
   addEventListener("keydown", e => {
     if (form.hidden || document.activeElement === input || e.metaKey || e.ctrlKey || e.altKey) return;
