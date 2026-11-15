@@ -37,7 +37,7 @@ body {
 [hidden] { display: none !important; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-#pond, #snap { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#pond, #snap, #sky { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 
 .intro { position: fixed; inset: 0; z-index: 1; display: grid; place-content: center; justify-items: center; pointer-events: none; padding: 24px; }
 .intro-box { position: relative; isolation: isolate; display: grid; justify-items: center; gap: 6px; }
@@ -113,3 +113,6 @@ body {
 .search input:focus-visible { outline: none; }
 @media (max-width: 720px) { .search { margin-top: 28px; width: 90vw; } }
 @media (prefers-reduced-motion: reduce) { .search { opacity: 1; } .intro-box.go + .search { animation: none; } }
+
+/* ── the sky: weather over the pond, under the clock ── */
+#sky { z-index: 0; pointer-events: none; }

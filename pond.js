@@ -177,7 +177,12 @@
     const plan = [];
     let planAt = 0;
     /* Caustics: two drifting noise fields; where they meet, light gathers in a thin moving net, as on a pool floor. */
-    const caus = (x, y) => 1 - Math.min(1, Math.abs(noise(x / 46 + t * 0.21, y / 46 - t * 0.13, 7) - noise(x / 39 - t * 0.17, y / 52 + t * 0.19, 11)) * 5.5);
+    /* wind: the net drifts downwind (flowX/Y in pixels), and a stronger wind makes it busier */
+    let windX = 0, windY = 0, flowX = 0, flowY = 0, chop = 1;
+    const caus = (x, y) => {
+      x -= flowX; y -= flowY;
+      return 1 - Math.min(1, Math.abs(noise(x / 46 + t * 0.21 * chop, y / 46 - t * 0.13 * chop, 7) - noise(x / 39 - t * 0.17 * chop, y / 52 + t * 0.19 * chop, 11)) * 5.5);
+    };
 
     function makeFish() {
       fish = Array.from({ length: MOST }, (_, i) => varietyOf(i)).map((variety, i) => {
@@ -624,7 +629,9 @@
       for (const g of rings) {
         const age = t - g.born, life = 1 - age / (g.tiny ? 0.7 : g.small ? DROP_LIFE : RING_LIFE);
         if (life <= 0 || age < 0) continue;
-        const dx = px - g.x, dy = py - g.y, d = Math.hypot(dx, dy);
+        const dx = px - g.x, dy = py - g.y, far = ((g.small ? age * 34 + 4 : age * 74 + 26) * g.k) + cw * 2;
+        if (dx > far || -dx > far || dy > far || -dy > far) continue;
+        const d = Math.hypot(dx, dy);
         for (let j = 0; j < (g.small ? 1 : 2); j++) {
           const ag = age - j * 0.38;
           if (ag <= 0) continue;
@@ -728,6 +735,7 @@
     /* One fixed step of the whole pond. */
     function advance(dt) {
       t += dt;
+      flowX += windX * dt; flowY += windY * dt;
       step(dt);
       stepPaws(dt);
       stepFood(dt);
@@ -755,6 +763,36 @@
         gold: scheme([230, 164, 52], [222, 228, 232], [98, 74, 42]),
         sakura: scheme([238, 132, 128], [250, 240, 228], [66, 60, 70])
       };
+    }
+
+    /*
+     * Glyph atlas: each character in each colour is drawn once into a slot of an offscreen canvas, then
+     * copied with drawImage, which is far cheaper than thousands of fillText calls a frame. Slots are whole
+     * device pixels and land on whole device pixels, so the glyphs stay as crisp as fillText. Cleared on
+     * resize and on a colour change (also after the web font arrives).
+     */
+    let atlas = null, actx = null, aslots = new Map(), anext = 0, aw = 0, ah = 0, aper = 0, afont = "";
+    function atlasReset() { aslots = new Map(); anext = 0; atlas = null; }
+    function glyphAt(g, color, x, y) {
+      const font = `600 ${Math.round(ch * 0.74)}px ${MONO}`;
+      if (!atlas || afont !== font) {
+        aw = Math.ceil(cw * dpr / 2) * 2 + 4; ah = Math.ceil(ch * dpr / 2) * 2 + 4;
+        aper = Math.max(1, Math.floor(2048 / aw));
+        atlas = document.createElement("canvas"); atlas.width = aper * aw; atlas.height = Math.max(ah, Math.floor(2048 / ah) * ah);
+        actx = atlas.getContext("2d"); afont = font; aslots = new Map(); anext = 0;
+      }
+      const key = color + g;
+      let slot = aslots.get(key);
+      if (slot === undefined) {
+        if (anext >= aper * Math.floor(atlas.height / ah)) { actx.clearRect(0, 0, atlas.width, atlas.height); aslots.clear(); anext = 0; }
+        slot = anext++; aslots.set(key, slot);
+        const sx = (slot % aper) * aw, sy = Math.floor(slot / aper) * ah;
+        actx.setTransform(dpr, 0, 0, dpr, sx + aw / 2, sy + ah / 2);
+        actx.font = font; actx.textAlign = "center"; actx.textBaseline = "middle"; actx.fillStyle = color; actx.globalAlpha = 1;
+        actx.fillText(g, 0, 0);
+      }
+      const sx = (slot % aper) * aw, sy = Math.floor(slot / aper) * ah;
+      ctx.drawImage(atlas, sx, sy, aw, ah, (Math.round(x * dpr) - aw / 2) / dpr, (Math.round(y * dpr) - ah / 2) / dpr, aw / dpr, ah / dpr);
     }
 
     function render() {
@@ -803,21 +841,22 @@
         for (let c = 0; c < cols; c++) {
           const i = r * cols + c, x = c * cw + cw / 2, y = r * ch + ch / 2;
           if (tileA[i] > 0 || glyphA[i] > 0) continue;
-          if (rings.length) { const g = ringAt(x, y); if (g) { ctx.globalAlpha = g.a; ctx.fillText(g.g, x, y); continue; } }
+          if (rings.length) { const g = ringAt(x, y); if (g) { ctx.globalAlpha = g.a; glyphAt(g.g, dot, x, y); continue; } }
           const w = wake[i];
-          if (w > 0.03) { ctx.globalAlpha = Math.min(0.5, w * 1.2); ctx.fillText(w > 0.25 ? ":" : "·", x, y); continue; }
+          if (w > 0.03) { ctx.globalAlpha = Math.min(0.5, w * 1.2); glyphAt(w > 0.25 ? ":" : "·", dot, x, y); continue; }
           /* the caustic net on open water, as faint strokes that drift and fold */
           const cl = caus(x, y);
-          if (cl > 0.8) { ctx.globalAlpha = (cl - 0.8) * 1.3; ctx.fillText(cl > 0.94 ? "~" : cl > 0.87 ? "-" : "·", x, y); continue; }
+          if (cl > 0.8) { ctx.globalAlpha = (cl - 0.8) * 1.3; glyphAt(cl > 0.94 ? "~" : cl > 0.87 ? "-" : "·", dot, x, y); continue; }
           const h = h2(c, r);
-          if (h < spark) { ctx.globalAlpha = 0.1 + 0.12 * (0.5 + 0.5 * Math.sin(t * 0.9 + h * 900)); ctx.fillText("·", x, y); }
+          if (h < spark) { ctx.globalAlpha = 0.1 + 0.12 * (0.5 + 0.5 * Math.sin(t * 0.9 + h * 900)); glyphAt("·", dot, x, y); }
         }
       }
       fill = -1;
+      let fillCss = dot;
       for (const i of touched) {
         if (!(glyphA[i] > 0) || glyphCode[i] === 32) continue;
-        if (glyphRGB[i] !== fill) { fill = glyphRGB[i]; ctx.fillStyle = css(fill); }
-        ctx.globalAlpha = glyphA[i]; ctx.fillText(String.fromCharCode(glyphCode[i]), (i % cols) * cw + cw / 2, ((i / cols) | 0) * ch + ch / 2);
+        if (glyphRGB[i] !== fill) { fill = glyphRGB[i]; fillCss = css(fill); ctx.fillStyle = fillCss; }
+        ctx.globalAlpha = glyphA[i]; glyphAt(String.fromCharCode(glyphCode[i]), fillCss, (i % cols) * cw + cw / 2, ((i / cols) | 0) * ch + ch / 2);
       }
       drawFood();
       for (const p of paws) drawPaw(p);
@@ -848,9 +887,8 @@
     }
 
     /*
-     * Live mode: one animation frame. The pond moves at the display's rate and
-     * draws a frame at most every 12 ms: a 60 Hz screen gets every frame, a
-     * 120 Hz screen every other one. A slow machine simply gets fewer frames
+     * Live mode: one animation frame. The pond moves and draws at the display's
+     * rate (at most every 5 ms), so 120 and 144 Hz screens get every frame. A slow machine simply gets fewer frames
      * from the browser; the time a draw call takes is no guide, as it includes
      * waiting for the GPU to finish the frame before.
      */
@@ -863,15 +901,15 @@
       const moving = !paused && !reduce;
       if (moving && dt > 0) advance(dt);
       if (!moving && !dirty) return;
-      if (now - drawn < 12 && !dirty) return;
+      if (now - drawn < 5 && !dirty) return;
       dirty = false;
       drawn = now;
       render();
     }
 
     return {
-      size(w, h) { size(w, h); colors(); dirty = true; },
-      colors() { colors(); dirty = true; },
+      size(w, h) { size(w, h); colors(); atlasReset(); dirty = true; },
+      colors() { colors(); atlasReset(); dirty = true; },
       reset,
       start() {
         reset();
@@ -883,6 +921,27 @@
       /* film events: at simulation time `at`, run fn */
       at(at, fn) { plan.push({ at, fn }); plan.sort((a, b) => a.at - b.at); return this; },
       paw: (x, y) => poke(x, y),
+      /* A ripple where you touch the water: rings spread, and the koi close by start away, then come back to look. */
+      ripple(x, y) {
+        if (!water(x, y)) return false;
+        rings.push({ x, y, born: t, k: K * 0.8 });
+        stamp(x, y, 2, 0.7);
+        const reach = 170 * K;
+        for (const f of fish) {
+          const hx = headX(f), hy = headY(f), d = Math.hypot(hx - x, hy - y);
+          if (d < reach) { f.flee = Math.max(f.flee, 0.75 * (1 - d / reach * 0.7)); f.fleeA = Math.atan2(hy - y, hx - x); }
+        }
+        dirty = true;
+        return true;
+      },
+      /* A raindrop (or a snowflake) landing at (x, y): one tiny ring. */
+      drop(x, y, strength = 1) {
+        if (paused || reduce || x < 0 || y < 0 || x > vw || y > vh) return;
+        if (rings.length > 160) rings.shift();
+        rings.push({ x, y, born: t, k: K * 0.35 * strength, small: true, tiny: true });
+      },
+      /* Wind across the water, in pixels a second; chop makes the light net move faster. */
+      wind(vx, vy, c = 1) { windX = vx; windY = vy; chop = c; },
       feed: (x, y) => feed(x, y),
       pause(v) { paused = v === undefined ? !paused : !!v; dirty = true; return paused; },
       get paused() { return paused; },
