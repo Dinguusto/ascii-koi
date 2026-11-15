@@ -7,7 +7,7 @@
  *   ?ui=0                       no controls (for a wallpaper or a recording)
  *   ?engine=google|ddg|bing|brave|kagi   where the search box sends you
  *   ?city=Boston or ?lat=..&lon=..       where the weather comes from (else a rough guess from your IP)
- *   ?weather=snow|rain|drizzle|storm|fog|cloudy|partly|wind|night|clear|off   preview a sky, or none
+ *   ?preview=snow|rain|drizzle|storm|fog|cloudy|partly|wind|night|clear   preview a sky;  ?weather=off  no weather
  *   keys: 1 2 3 or T for the water, space to pause, / or just start typing to search
  */
 (() => {

@@ -13,8 +13,9 @@
  * The weather is cached for ten minutes, so a new tab shows it at once, and it is checked again
  * every ten minutes while the tab is open.
  *
- *   ?weather=snow|rain|drizzle|storm|fog|cloudy|partly|wind|night|clear   preview (labelled "preview")
+ *   ?preview=snow|rain|drizzle|storm|fog|cloudy|partly|wind|night|clear   preview a sky (labelled "preview")
  *   ?weather=off                                                         no weather
+ *   (anything else in ?weather= is ignored, so an old preview link shows the real weather)
  *   ?units=c|f
  */
 (global => {
@@ -111,7 +112,7 @@
 
   function createWeather({ pond, onReport = () => {} }) {
     const q = new URLSearchParams(location.search);
-    const mode = (q.get("weather") || "").toLowerCase();
+    const mode = (q.get("preview") || "").toLowerCase(), off = (q.get("weather") || "").toLowerCase() === "off";
     const fahrenheit = q.get("units") ? q.get("units").toLowerCase() !== "c" : (navigator.language || "en-US") === "en-US";
     let first = true;
 
@@ -184,7 +185,7 @@
 
     return {
       start() {
-        if (mode === "off") return;
+        if (off) return;
         if (PREVIEW[mode]) { const pv = PREVIEW[mode]; show({ sky: pv.sky, tempF: pv.temp, text: pv.text }, true); return; }
         const cached = store.get("ascii-koi-sky");
         if (cached && cached.r && Date.now() - cached.at < 3 * 36e5) show(cached.r);
