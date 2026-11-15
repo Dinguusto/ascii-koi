@@ -176,8 +176,117 @@
     /* events for a film: { at, fn } run when the simulation passes them */
     const plan = [];
     let planAt = 0;
-    /* Caustics: two drifting noise fields; where they meet, light gathers in a thin moving net, as on a pool floor. */
-    const caus = (x, y) => 1 - Math.min(1, Math.abs(noise(x / 46 + t * 0.21, y / 46 - t * 0.13, 7) - noise(x / 39 - t * 0.17, y / 52 + t * 0.19, 11)) * 5.5);
+    /*
+     * The sky over the pond, set from outside with pond.weather({ … }). It is drawn the way the pond draws
+     * everything else: in the same cells, with the same dots, rings and shadows.
+     *   rain, drizzle   drops land on the water as small rings
+     *   snow            flakes come down (* then + then .), their shadow closing in, and melt into a ring
+     *   wind            the light net drifts downwind and patches of ripples (~ -) sweep across the water
+     *   cloud           cloud shadows drift over the pond and the light net goes out under them
+     *   night, fog      darker water and no sun net (stars glint on a clear night); fog greys the water and the koi
+     *   storm           the water flashes now and then
+     */
+    const SKY0 = { rain: 0, drizzle: 0, snow: 0, wind: 0, windFrom: 270, cloud: 0, night: 0, fog: 0, storm: 0 };
+    let sky = { ...SKY0 }, skyTo = { ...SKY0 }, skySet = false;
+    let windX = 0, windY = 0, windK = 0, flowX = 0, flowY = 0, gustX = 0, gustY = 0, cloudX = 0, cloudY = 0;
+    let flakes = [], drips = [], rainDue = 0, snowDue = 0, flash = 0, flashAt = 8, flash2 = -1, wSeed = 0, koiK = 1, sunK = 1, skyFrame = 0;
+    let wG = new Uint16Array(0), wA = new Float32Array(0), cloudGrid = new Float32Array(0), cgw = 0, cgh = 0;
+    const wTouched = [], CB = 2, rnd = () => h2(++wSeed, 977);
+    /* Caustics: two drifting noise fields; where they meet, light gathers in a thin moving net, as on a pool floor. The wind carries it downwind. */
+    const caus = (x, y) => { x -= flowX; y -= flowY; return 1 - Math.min(1, Math.abs(noise(x / 46 + t * 0.21, y / 46 - t * 0.13, 7) - noise(x / 39 - t * 0.17, y / 52 + t * 0.19, 11)) * 5.5); };
+    const cloudAt = (c, r) => cgw ? cloudGrid[Math.min(cgh - 1, (r / CB) | 0) * cgw + Math.min(cgw - 1, (c / CB) | 0)] : 0;
+
+    function stepSky(dt) {
+      const e = 1 - Math.exp(-dt / 3);
+      for (const k in SKY0) if (k !== "windFrom") sky[k] += (skyTo[k] - sky[k]) * e;
+      const dr = (skyTo.windFrom - sky.windFrom) * Math.PI / 180;
+      sky.windFrom += Math.atan2(Math.sin(dr), Math.cos(dr)) * 180 / Math.PI * e;
+      /* the wind blows toward windFrom + 180 degrees, with north up the screen */
+      const to = (sky.windFrom + 180) * Math.PI / 180, sp = Math.min(48, sky.wind * 1.5);
+      windX = Math.sin(to) * sp; windY = -Math.cos(to) * sp; windK = sstep(6, 26, sky.wind);
+      flowX += windX * 0.3 * dt; flowY += windY * 0.3 * dt;
+      gustX += windX * 2.2 * dt; gustY += windY * 2.2 * dt;
+      cloudX += (windX * 0.5 + 3) * dt; cloudY += windY * 0.5 * dt;
+      const area = vw * vh / (1440 * 900);
+      /* rain: drops land as small rings */
+      rainDue += (sky.rain * 46 + sky.drizzle * 30) * area * dt;
+      while (rainDue >= 1) { rainDue--; const big = sky.rain >= sky.drizzle; drips.push({ x: rnd() * vw, y: rnd() * vh, born: t, s: big ? 0.75 + rnd() * 0.5 : 0.45 + rnd() * 0.3 }); }
+      for (let j = drips.length - 1; j >= 0; j--) if (t - drips[j].born > 0.6) drips.splice(j, 1);
+      /* snow: each flake takes a few seconds to come down, drifting with the wind */
+      snowDue += sky.snow * 22 * area * dt;
+      while (snowDue >= 1) { snowDue--; flakes.push({ x: rnd() * (vw + 120) - 60, y: rnd() * (vh + 80) - 40, born: t, life: 3.5 + rnd() * 3, sway: rnd() * 6.28 }); }
+      for (let j = flakes.length - 1; j >= 0; j--) {
+        const f = flakes[j], u = (t - f.born) / f.life, hgt = 1 - u;
+        if (u >= 1) { if (rnd() < 0.5) drips.push({ x: f.x, y: f.y, born: t, s: 0.4 }); flakes.splice(j, 1); continue; }
+        f.x += (windX * (0.4 + 0.6 * hgt) + Math.sin(t * 1.3 + f.sway) * 9) * dt;
+        f.y += (windY * (0.4 + 0.6 * hgt) + Math.cos(t * 1.1 + f.sway) * 5) * dt;
+      }
+      /* storm: a double flash now and then */
+      if (sky.storm > 0.5 && t > flashAt) { flash = 1; flash2 = t + 0.16; flashAt = t + 10 + rnd() * 18; }
+      if (flash2 > 0 && t > flash2) { flash = Math.max(flash, 0.7); flash2 = -1; }
+      flash *= Math.exp(-dt * 7);
+    }
+    /* how much the koi show and how much sun reaches the pond floor */
+    function skyLight() {
+      koiK = 1 - 0.16 * sky.night - 0.3 * sky.fog;
+      sunK = (1 - 0.9 * sky.night) * (1 - 0.9 * sky.fog) * (1 - 0.5 * Math.max(sky.rain, sky.snow, sky.drizzle));
+    }
+    /* the water under the sky: darker at night and under heavy cloud or rain, paler in fog, bright for a moment in a flash */
+    function skyWater() {
+      let w = P.water;
+      const dim = (0.34 * sky.night + 0.12 * sky.cloud + 0.06 * Math.max(sky.rain, sky.snow)) * (P.dark ? 1 : 0.4);
+      if (dim > 0.002) w = mixC(w, [0, 0, 0], dim);
+      if (sky.fog > 0.01) w = mixC(w, P.dark ? P.ink : [250, 250, 247], (P.dark ? 0.08 : 0.3) * sky.fog);
+      if (flash > 0.01) w = mixC(w, P.dark ? [205, 218, 236] : [255, 255, 255], 0.2 * flash);
+      return w;
+    }
+    /* The sky into the cell buffers: flakes over everything with their shadows, rain rings on the open water, the cloud field. */
+    function rasterSky() {
+      for (const i of wTouched) wA[i] = 0;
+      wTouched.length = 0;
+      if (sky.cloud > 0.03) {
+        const gw = Math.ceil(cols / CB), gh = Math.ceil(rows / CB);
+        if (gw !== cgw || gh !== cgh) { cgw = gw; cgh = gh; cloudGrid = new Float32Array(gw * gh); skyFrame = 0; }
+        /* clouds move slowly: the field is worked out every fourth frame */
+        if (skyFrame++ % 4 === 0) {
+          const thr = lerp(0.8, 0.2, sky.cloud);
+          for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
+            const x = (gx + 0.5) * CB * cw - cloudX, y = (gy + 0.5) * CB * ch - cloudY;
+            const v = noise(x / 380, y / 270, 31) * 0.7 + noise(x / 130, y / 100, 37) * 0.3;
+            cloudGrid[gy * gw + gx] = sstep(thr - 0.11, thr + 0.11, v);
+          }
+        }
+      } else cgw = 0;
+      for (const f of flakes) {
+        const age = t - f.born, hgt = 1 - age / f.life;
+        const c = Math.floor(f.x / cw), r = Math.floor(f.y / ch);
+        if (hgt <= 0 || c < 0 || r < 0 || c >= cols || r >= rows) continue;
+        const i = r * cols + c;
+        if (!tileA[i] && !glyphA[i]) touched.push(i);
+        glyphRGB[i] = pack(P.dot); glyphA[i] = (0.3 + 0.45 * hgt) * Math.min(1, age * 2) * Math.min(1, hgt * 6);
+        glyphCode[i] = (hgt > 0.62 ? "*" : hgt > 0.28 ? "+" : ".").charCodeAt(0);
+        const sc = Math.round(hgt * 3), sr = Math.round(hgt * 2), si = (r + sr) * cols + (c + sc);
+        if ((sc || sr) && r + sr < rows && c + sc < cols) shade[si] = Math.max(shade[si], (P.dark ? 0.28 : 0.14) * hgt);
+      }
+      const kk = K * 0.55;
+      for (const d of drips) {
+        const age = t - d.born, life = 1 - age / 0.6;
+        if (life <= 0 || age < 0) continue;
+        const R = (3 + age * 44) * d.s * kk, a0 = life ** 1.5 * 0.42 * Math.min(1, d.s + 0.3);
+        const c0 = Math.max(0, Math.floor((d.x - R) / cw) - 1), c1 = Math.min(cols - 1, Math.floor((d.x + R) / cw) + 1);
+        const r0 = Math.max(0, Math.floor((d.y - R) / ch) - 1), r1 = Math.min(rows - 1, Math.floor((d.y + R) / ch) + 1);
+        for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+          const dx = c * cw + cw / 2 - d.x, dy = r * ch + ch / 2 - d.y, dd = Math.hypot(dx, dy);
+          let a = 0, g = 0;
+          if (age < 0.1 && dd < cw * 0.6) { a = 0.5 * (1 - age / 0.1); g = 46; }
+          else if (Math.abs(dd - R) <= cw * 0.62) { a = a0; g = lineGlyph(-dy, dx).charCodeAt(0); }
+          const i = r * cols + c;
+          if (a <= wA[i]) continue;
+          if (!(wA[i] > 0)) wTouched.push(i);
+          wA[i] = a; wG[i] = g;
+        }
+      }
+    }
 
     function makeFish() {
       fish = Array.from({ length: MOST }, (_, i) => varietyOf(i)).map((variety, i) => {
@@ -207,6 +316,7 @@
       tileRGB = new Uint32Array(n); tileA = new Float32Array(n); glyphRGB = new Uint32Array(n); glyphA = new Float32Array(n);
       glyphCode = new Uint16Array(n); shade = new Float32Array(n); wake = new Float32Array(n); wakeTmp = new Float32Array(n);
       tintRGB = new Uint32Array(n); tintA = new Float32Array(n);
+      wG = new Uint16Array(n); wA = new Float32Array(n); wTouched.length = 0; cgw = 0;
       touched.length = 0;
     }
     const count = () => Math.round(room(vw, vh, MOST));
@@ -379,7 +489,7 @@
       const diag = Math.hypot(cw, ch);
       /* A koi rising for food comes up toward the surface: brighter, its shadow further below it. */
       const depth = lerp(f.depth, 1, f.rise * 0.85);
-      const Kc = P.koi[f.colour], alphaBase = (P.dark ? 0.82 : 0.9) * (0.55 + 0.45 * depth) * f.seen;
+      const Kc = P.koi[f.colour], alphaBase = (P.dark ? 0.82 : 0.9) * (0.55 + 0.45 * depth) * f.seen * koiK;
       const sdc = 1 + Math.round(depth * 2), sdr = 1 + Math.round(depth);
       const lx = -0.6, ly = -0.8;
       for (let r = r0; r <= r1; r++) {
@@ -728,6 +838,7 @@
     /* One fixed step of the whole pond. */
     function advance(dt) {
       t += dt;
+      stepSky(dt);
       step(dt);
       stepPaws(dt);
       stepFood(dt);
@@ -768,12 +879,14 @@
         return 0.1 + 0.9 * sstep(0, pad, d);
       } : () => 1;
       const order = fish.filter(f => f.seen > 0).sort((a, b) => a.depth - b.depth);
+      skyLight();
       for (const f of order) rasterize(f, dimAt);
       rasterDrops();
+      rasterSky();
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.globalAlpha = 1;
-      ctx.fillStyle = css(pack(P.water));
+      ctx.fillStyle = css(pack(skyWater()));
       ctx.fillRect(0, 0, vw, vh);
       ctx.font = `600 ${Math.round(ch * 0.74)}px ${MONO}`;
       ctx.textAlign = "center";
@@ -785,6 +898,23 @@
        * Every rectangle first, then every glyph. Each glyph stays inside its own cell, so the picture is the
        * same as drawing cell by cell, but the GPU gets a few long runs of one kind instead of thousands of switches.
        */
+      /* cloud shadows, in blocks of cells; an overcast sky dims the whole pond instead (skyWater) */
+      const broken = cgw ? Math.min(1, sky.cloud * (1 - sstep(0.8, 1, sky.cloud)) * 2.5) : 0;
+      if (broken > 0.02) {
+        ctx.fillStyle = shadeFill;
+        const bw = CB * cw, bh = CB * ch, k = (P.dark ? 0.11 : 0.07) * broken;
+        /* a run of blocks with the same shade along a row is one rectangle */
+        for (let gy = 0; gy < cgh; gy++) {
+          const y0 = snap(gy * bh), y1 = snap((gy + 1) * bh);
+          for (let gx = 0; gx < cgw;) {
+            const q = Math.round(cloudGrid[gy * cgw + gx] * k * 100);
+            let gx1 = gx + 1;
+            while (gx1 < cgw && Math.round(cloudGrid[gy * cgw + gx1] * k * 100) === q) gx1++;
+            if (q > 0) { ctx.globalAlpha = q / 100; ctx.fillRect(snap(gx * bw), y0, snap(gx1 * bw) - snap(gx * bw), y1 - y0); }
+            gx = gx1;
+          }
+        }
+      }
       ctx.fillStyle = shadeFill;
       for (let i = 0; i < shade.length; i++) {
         if (!(shade[i] > 0)) continue;
@@ -798,19 +928,30 @@
         if (tileRGB[i] !== fill) { fill = tileRGB[i]; ctx.fillStyle = css(fill); }
         ctx.globalAlpha = tileA[i]; ctx.fillRect(x0, y0, snap(x + cw - gap) - x0, snap(y + ch - gap) - y0);
       }
+      /* on a clear night the stars glint on the water */
+      const starK = sky.night * (1 - sky.cloud) * (1 - sky.fog), sparkN = spark + 0.02 * starK;
       ctx.fillStyle = dot;
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           const i = r * cols + c, x = c * cw + cw / 2, y = r * ch + ch / 2;
           if (tileA[i] > 0 || glyphA[i] > 0) continue;
+          if (wA[i] > 0) { ctx.globalAlpha = wA[i]; ctx.fillText(String.fromCharCode(wG[i]), x, y); continue; }
           if (rings.length) { const g = ringAt(x, y); if (g) { ctx.globalAlpha = g.a; ctx.fillText(g.g, x, y); continue; } }
           const w = wake[i];
           if (w > 0.03) { ctx.globalAlpha = Math.min(0.5, w * 1.2); ctx.fillText(w > 0.25 ? ":" : "·", x, y); continue; }
           /* the caustic net on open water, as faint strokes that drift and fold */
-          const cl = caus(x, y);
-          if (cl > 0.8) { ctx.globalAlpha = (cl - 0.8) * 1.3; ctx.fillText(cl > 0.94 ? "~" : cl > 0.87 ? "-" : "·", x, y); continue; }
+          const sun = sunK * (1 - 0.92 * cloudAt(c, r));
+          if (sun > 0.04) {
+            const cl = caus(x, y);
+            if (cl > 0.8) { ctx.globalAlpha = (cl - 0.8) * 1.3 * sun; ctx.fillText(cl > 0.94 ? "~" : cl > 0.87 ? "-" : "·", x, y); continue; }
+          }
           const h = h2(c, r);
-          if (h < spark) { ctx.globalAlpha = 0.1 + 0.12 * (0.5 + 0.5 * Math.sin(t * 0.9 + h * 900)); ctx.fillText("·", x, y); }
+          /* wind: patches of crests sweep downwind over the open water */
+          if (windK > 0.02 && h > 0.6 && h < 0.6 + 0.1 * windK) {
+            const n = noise((x - gustX) / 150, (y - gustY) / 110, 23), thr = 0.64 - 0.1 * windK;
+            if (n > thr) { const g = Math.min(1, (n - thr) / (0.88 - thr)); ctx.globalAlpha = g * 0.3 * (1 - 0.4 * sky.night); ctx.fillText(g > 0.4 ? "~" : "-", x, y); continue; }
+          }
+          if (h < sparkN) { ctx.globalAlpha = (0.1 + 0.12 * (0.5 + 0.5 * Math.sin(t * 0.9 + h * 900))) * (1 + 0.9 * starK); ctx.fillText("·", x, y); }
         }
       }
       fill = -1;
@@ -828,6 +969,7 @@
     function reset() {
       makeFish();
       paws.length = rings.length = drops.length = food.length = bubbles.length = 0;
+      flakes.length = drips.length = 0;
       wake.fill(0); wakeTmp.fill(0);
       t = 0;
       const n = count();
@@ -912,7 +1054,10 @@
         return [n >> 16, (n >> 8) & 255, n & 255, tintA[i]];
       },
       /* The water's light at canvas point (x, y), 0 to 1, from the caustic net: the title catches it as it plays over. */
-      light: (x, y) => caus(x, y)
+      light: (x, y) => caus(x, y) * (0.35 + 0.65 * sunK),
+      /* The sky: { rain, drizzle, snow, cloud, night, fog, storm (0 to 1), wind (mph), windFrom (degrees) }. The first one is there at once, later ones ease in over a few seconds. */
+      weather(s, now) { skyTo = { ...SKY0, ...s }; if (now || reduce || !skySet) { sky = { ...skyTo }; skySet = true; } dirty = true; },
+      get sky() { return { ...skyTo }; }
     };
   }
 

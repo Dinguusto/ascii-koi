@@ -6,6 +6,8 @@
  *   ?title=One%20Page&tag=is%20all%20you%20need   your own words instead of the clock
  *   ?ui=0                       no controls (for a wallpaper or a recording)
  *   ?engine=google|ddg|bing|brave|kagi   where the search box sends you
+ *   ?city=Boston or ?lat=..&lon=..       where the weather comes from (else a rough guess from your IP)
+ *   ?weather=snow|rain|drizzle|storm|fog|cloudy|partly|wind|night|clear|off   preview a sky, or none
  *   keys: 1 2 3 or T for the water, space to pause, / or just start typing to search
  */
 (() => {
@@ -75,8 +77,10 @@
     cw: narrow() ? 3 : 4, ch: narrow() ? 4 : 5, maxW: Math.min(innerWidth * (narrow() ? 0.66 : 0.42), 420), tone: 0.88, edge: !narrow(), glow: 0.7
   }), look);
   const clock = () => performance.now() / 1000;
+  let weatherLabel = "";
+  const showDate = () => { dateLine.textContent = current.date + (weatherLabel ? "  ·  " + weatherLabel : ""); };
   const buildWords = () => {
-    dateLine.textContent = current.date;
+    showDate();
     return Promise.all([title.build(clock()), tag.build(clock() + 0.35)]);
   };
   srTitle.textContent = own ? `${current.title} ${current.tag}` : "ASCII Koi";
@@ -231,7 +235,13 @@
   });
   if (!form.hidden) input.focus();
 
+  /* ── the weather where you are, drawn by the pond itself (weather.js) ── */
+  const weather = window.AsciiKoi.createWeather
+    ? window.AsciiKoi.createWeather({ pond, onReport: w => { weatherLabel = w.label; showDate(); } })
+    : null;
+
   pond.start();
+  weather?.start();
   buildWords().then(() => { box.classList.add("go"); requestAnimationFrame(frame); });
   /* canvas text cannot trigger a webfont load; redraw once the mono face is in */
   document.fonts?.load(`600 12px "Geist Mono"`).then(() => pond.colors());
